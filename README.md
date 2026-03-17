@@ -5,6 +5,7 @@
 | | |
 |---|---|
 | **CVE** | CVE-2026-20643 |
+| **Discovered by** | Thomas Espach ([WebKit Bugzilla 306050](https://bugs.webkit.org/show_bug.cgi?id=306050)) |
 | **Component** | WebKit — `WebCore::Navigation::innerDispatchNavigateEvent` |
 | **Affected** | iOS 26.3.1 build `23D8133` (`iPhone18,2`) |
 | **Class** | SOP bypass |
