@@ -10,6 +10,7 @@
 | **Affected** | iOS 26.3.1 build `23D8133` (`iPhone18,2`) |
 | **Class** | SOP bypass |
 | **Interaction** | Click / link activation |
+| **Confirmed** | Binary diff of vulnerable vs patched WebCore |
 
 ## Summary
 
