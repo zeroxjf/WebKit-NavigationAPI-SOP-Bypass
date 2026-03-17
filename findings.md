@@ -1,81 +1,71 @@
-# CVE-2026-20643 — Navigation API SOP Bypass (iOS 26.3.1 vulnerable build)
+# CVE-2026-20643 — Navigation API cross-origin gate bug (binary diff verified)
 
-## Summary
-- **Issue class:** Cross-origin policy bypass in WebKit Navigation API interception gate.
-- **Effect:** `NavigateEvent.canIntercept` may be `true` for cross-origin navigations that should be non-interceptable.
-- **Observed vulnerable target:** iOS `26.3.1` restore build `23D8133` (`iPhone18,2`) WebCore from dyld shared cache.
+## Scope
+- Vulnerable: iOS 26.3.1 restore build `23D8133` (iPhone18,2), WebCore in dyld cache.
+- Patched (BSI OTA): iOS 26.3.1(a) `23D771330a`, binary diff in `cryptex-system-arm64e`.
+- Function diffed: `WebCore::Navigation::innerDispatchNavigateEvent(...)` at `0x1a1303304`.
 
-## Root Cause
-The URL rewrite/interception eligibility logic (in `documentCanHaveURLRewritten`, inlined into Navigation flow) accepts HTTP-family targets too broadly:
-
+## What changed (exact)
+### Vulnerable logic (23D8133, IDA pseudocode)
 ```cpp
-if (!isSameSite && !isSameOrigin)
-    return false;
-if (targetURL.protocolIsInHTTPFamily())
-    return true; // missing strict component equality checks
+isSameSiteAs = SecurityOrigin::isSameSiteAs(currOrigin, targetOrigin);
+isSameOriginAs = SecurityOrigin::isSameOriginAs(currOrigin, targetOrigin);
+
+if ((isSameSiteAs & 1) == 0 && !isSameOriginAs)
+    v34 = 1; // deny intercept
+else if ((*(_BYTE *)(targetURL + 32) & 2) != 0)
+    v34 = 0; // allow intercept
+else if (!URL::protocolIs(targetURL, "file")
+      || isEqualIgnoringQueryAndFragments(docURL, targetURL))
+    v34 = equalIgnoringFragmentIdentifier(docURL, targetURL) ^ 1;
+else
+    v34 = 1;
 ```
 
-This allows same-site-but-cross-origin cases (notably cross-port) to pass the gate.
+Key point: gate allows the fast-path when `isSameSiteAs` is true (even if not same-origin).
 
-### Expected behavior (spec-aligned)
-Interception should be denied if document URL and target URL differ in any of:
-- scheme
-- username
-- password
-- host
-- port
+### Patched logic (23D771330a)
+```cpp
+v34 = 1; // default deny
+if (SecurityOrigin::isSameOriginAs(currOrigin, targetOrigin)) {
+    if (URL::user(docURL) == URL::user(targetURL) &&
+        URL::password(docURL) == URL::password(targetURL)) {
+        if ((*(_BYTE *)(targetURL + 32) & 2) != 0)
+            v34 = 0;
+        else if (!URL::protocolIs(targetURL, "file")
+              || isEqualIgnoringQueryAndFragments(docURL, targetURL))
+            v34 = equalIgnoringFragmentIdentifier(docURL, targetURL) ^ 1;
+    }
+}
+```
 
-## Reverse Engineering Evidence
+Key point: old same-site gate was replaced by strict same-origin gate, plus explicit `user/password` validation.
 
-### Vulnerable path
-- `WebCore::Navigation::innerDispatchNavigateEvent(...)`
-  - Address: `0x1a1303304`
-  - Binary: WebCore (from `23D8133` dyld cache)
+## Evidence addresses
+- Old build (`mcp__ida_headless_2`):
+  - `0x1a1303480` -> `SecurityOrigin::isSameSiteAs`
+  - `0x1a1303490` -> `SecurityOrigin::isSameOriginAs`
+  - `0x1a1303b44` pseudocode: `if ((isSameSiteAs & 1) == 0 && !isSameOriginAs) ...`
+- Patched build (`mcp__ida_headless_3`):
+  - `0x1a1303484` -> `SecurityOrigin::isSameOriginAs`
+  - `0x1a1303494`/`0x1a13034a0` -> `URL::user`
+  - `0x1a13034bc`/`0x1a13034c8` -> `URL::password`
+  - `0x1a13034ac`/`0x1a13034d0` -> `WTF::equal(StringImpl*, StringImpl*)`
 
-Inside that function, the gate sequence uses:
-- Same-site / same-origin checks
-- HTTP family allow branch
-- File/fragment special cases
+## `canIntercept` plumbing confirmation
+- `WebCore::jsNavigateEvent_canIntercept` (`0x19f84ab84`) reads `*(event + 160)`.
+- `WebCore::NavigateEvent::NavigateEvent` (`0x1a12fa834`) writes init dword into `event+160`.
+- `innerDispatchNavigateEvent` computes this bit from the above gate (`v34` inversion path).
 
-Stubs resolved from callsites in this block:
-- `0x1A4186DC0` -> `WTF::URL::protocolIs(...)_stub`
-- `0x1A41842F0` -> `WTF::isEqualIgnoringQueryAndFragments(...)_stub`
-- `0x1A41842E0` -> `WTF::equalIgnoringFragmentIdentifier(...)_stub`
+## Trigger model
+- Same-site but cross-origin navigation (e.g. cross-port localhost) reaches permissive path in vulnerable build.
+- Patched build blocks that path unless strict same-origin plus user/password match.
 
-### `canIntercept` wiring
-- Getter:
-  - `WebCore::jsNavigateEvent_canIntercept`
-  - Address: `0x19f84ab84`
-  - Returns boolean from `*(event + 160)`.
-- Constructor path:
-  - `WebCore::NavigateEvent::NavigateEvent(...)`
-  - Address: `0x1a12fa834`
-  - Initializes `event+160..163` from init flags.
-- Source of init flag:
-  - `innerDispatchNavigateEvent` computes rewrite/interception eligibility and stores into NavigateEvent init before dispatch.
+## Impact
+- Wrong cross-origin authorization in Navigation API interception path.
+- Attacker-controlled content can get interception capability where origin boundary should deny it.
+- Practical abuse: navigation flow manipulation/confusion across origin boundaries.
 
-## Trigger Conditions
-
-### Reliable test case
-- Current page: `http://127.0.0.1:8000/`
-- Target URL: `http://127.0.0.1:8800/`
-- Same-site: yes (`127.0.0.1`)
-- Same-origin: no (different port)
-
-### Expected outputs
-- **Vulnerable:** `navigate` event reports `canIntercept === true` for cross-port target.
-- **Patched:** `navigate` event reports `canIntercept === false`.
-
-## Practical Impact
-- Navigation integrity break across origins in Navigation API path.
-- Attacker can intercept/suppress navigations that should cross an origin boundary.
-- Enables strong URL/context confusion and phishing workflow abuse in redirect-heavy flows.
-- High relevance to localhost multi-port environments (`:3000` -> `:3001`) where origin separation is port-based.
-
-## Limits of This Primitive Alone
-- By itself, this does **not** automatically grant arbitrary cross-origin response body read.
-- It is still a meaningful SOP boundary violation because interception authorization itself is wrong.
-
-## Correlation to Upstream Fix
-WebKit mainline fix adds strict equality checks for scheme/user/password/host/port before allowing URL rewriting/interception in this path, matching this root-cause analysis.
-
+## Confidence
+- High for root cause class and patch location: direct vulnerable vs patched function-level diff.
+- Medium-high for exact externally observable trigger variants: dynamic JS runtime behavior still depends on Navigation API availability/mode on target build.
