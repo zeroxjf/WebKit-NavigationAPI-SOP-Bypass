@@ -63,8 +63,8 @@ Key point: old same-site gate was replaced by strict same-origin gate, plus expl
 
 ## Impact
 - Wrong cross-origin authorization in Navigation API interception path.
-- Attacker-controlled content can get interception capability where origin boundary should deny it.
-- Practical abuse: navigation flow manipulation/confusion across origin boundaries.
+- Attacker-controlled content can receive interception capability for a navigation that should cross an origin boundary.
+- Practical abuse is navigation-flow manipulation or suppression across same-site, different-origin boundaries.
 
 ## Confidence
 - High for root cause class and patch location: direct vulnerable vs patched function-level diff.
